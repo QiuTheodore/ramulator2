@@ -188,9 +188,9 @@ struct DRAMNodeBase {
     };
 
     int get_preq_command(int command, const AddrVec_t& addr_vec, Clk_t m_clk) {
-      int child_id = addr_vec[m_level + 1];
-      if (m_spec->m_preqs[m_level][command]) {
-        int preq_cmd = m_spec->m_preqs[m_level][command](static_cast<NodeType*>(this), command, addr_vec, m_clk);
+      const auto& preq = m_spec->m_preqs[m_level][command];
+      if (preq) {
+        int preq_cmd = preq(static_cast<NodeType*>(this), command, addr_vec, m_clk);
         if (preq_cmd != -1) {
           // stop recursion: there is a prerequisite at this level
           return preq_cmd; 
@@ -203,7 +203,7 @@ struct DRAMNodeBase {
       }
 
       // recursively get_preq_command at my child
-      return m_child_nodes[child_id]->get_preq_command(command, addr_vec, m_clk);
+      return m_child_nodes[addr_vec[m_level + 1]]->get_preq_command(command, addr_vec, m_clk);
     };
 
     bool check_ready(int command, const AddrVec_t& addr_vec, Clk_t clk) {
@@ -212,23 +212,20 @@ struct DRAMNodeBase {
         return false; 
       }
 
-      int child_id = addr_vec[m_level+1];
-      if (m_level == m_spec->m_command_scopes[command] || !m_child_nodes.size()) {
-        // stop recursion: the check passed at all levels
-        return true; 
+      if (m_level == m_spec->m_command_scopes[command] || m_child_nodes.empty()) {
+        return true;
       }
 
+      const int child_id = addr_vec[m_level + 1];
       if (child_id == -1) {
-        // if it is a same bank command, recurse all children in rank level
-        bool ready = true;
-        for (auto child : m_child_nodes) {
-          ready = ready && child->check_ready(command, addr_vec, clk);
+        for (auto* child : m_child_nodes) {
+          if (!child->check_ready(command, addr_vec, clk)) {
+            return false;
+          }
         }
-        return ready;
-      } else {
-        // recursively check my child
-        return m_child_nodes[child_id]->check_ready(command, addr_vec, clk);
+        return true;
       }
+      return m_child_nodes[child_id]->check_ready(command, addr_vec, clk);
     };
 
     bool check_rowbuffer_hit(int command, const AddrVec_t& addr_vec, Clk_t m_clk) {

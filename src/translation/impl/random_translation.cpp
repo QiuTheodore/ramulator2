@@ -29,6 +29,16 @@ class RandomTranslation : public ITranslation, public Implementation {
     using Translation_t = std::vector<std::unordered_map<Addr_t, Addr_t>>;
     Translation_t m_translation;    // A vector of <vpn:ppn> maps, each core has its own map
 
+    // A per-core, one-entry translation fast path. Sequential cache-line
+    // accesses typically share the same virtual page. The underlying
+    // page mapping never changes after insertion in this implementation.
+    struct RecentPage {
+      Addr_t vpn = 0;
+      Addr_t ppn = 0;
+      bool valid = false;
+    };
+    std::vector<RecentPage> m_recent_pages;
+
     std::unordered_set<Addr_t> m_reserved_pages;   // A vector of reserved pages
 
 
@@ -48,49 +58,57 @@ class RandomTranslation : public ITranslation, public Implementation {
 
       m_frontend = cast_parent<IFrontEnd>();
       m_translation.resize(m_frontend->get_num_cores());
+      m_recent_pages.resize(m_frontend->get_num_cores());
 
       m_logger = Logging::create_logger("RandomTranslation");
     };
 
     bool translate(Request& req) override {
-      Addr_t vpn = req.addr >> m_offsetbits;
+      const Addr_t vpn = req.addr >> m_offsetbits;
+      auto& recent = m_recent_pages[req.source_id];
+      Addr_t ppn;
 
-      auto& core_translation = m_translation[req.source_id];
-      auto target = core_translation.find(vpn);
-      if (target == core_translation.end()) {
-        // No previous translation record. Assign a new page
-        if (m_num_free_physical_pages == 0) {
-          // We run out of physical pages. Randomly replace a previously assigned page (swap latency not modeled!)
-          Addr_t ppn_to_replace = m_allocator_rng() % m_num_pages;
-          // We do not replace a reserved page
-          while (m_reserved_pages.find(ppn_to_replace) != m_reserved_pages.end()) {
-            ppn_to_replace = m_allocator_rng() % m_num_pages;
+      if (recent.valid && recent.vpn == vpn) {
+        // No hash-table access is needed for consecutive lines on a page.
+        ppn = recent.ppn;
+      } else {
+        auto& core_translation = m_translation[req.source_id];
+        auto target = core_translation.find(vpn);
+        if (target == core_translation.end()) {
+          // Preserve the original PRNG call order and allocation behavior.
+          if (m_num_free_physical_pages == 0) {
+            Addr_t ppn_to_replace = m_allocator_rng() % m_num_pages;
+            while (m_reserved_pages.find(ppn_to_replace) != m_reserved_pages.end()) {
+              ppn_to_replace = m_allocator_rng() % m_num_pages;
+            }
+            core_translation[vpn] = ppn_to_replace;
+            ppn = ppn_to_replace;
+            m_logger->warn("Swapping out PPN {} for Addr {}, VPN {}.", ppn_to_replace, req.addr, vpn);
+          } else {
+            Addr_t ppn_to_assign = m_allocator_rng() % m_num_pages;
+            while (
+              (m_reserved_pages.find(ppn_to_assign) != m_reserved_pages.end())
+              || (!m_free_physical_pages[ppn_to_assign])
+            ) {
+              ppn_to_assign = m_allocator_rng() % m_num_pages;
+            }
+            core_translation[vpn] = ppn_to_assign;
+            ppn = ppn_to_assign;
+            m_num_free_physical_pages--;
           }
-          core_translation[vpn] = ppn_to_replace;
-          m_logger->warn("Swapping out PPN {} for Addr {}, VPN {}.", ppn_to_replace, req.addr, vpn);
         } else {
-          // We have available physical pages. Randomly assign one.
-          Addr_t ppn_to_assign = m_allocator_rng() % m_num_pages;
-          // We do not assign a reserved page or an already assigned page
-          while (
-            (m_reserved_pages.find(ppn_to_assign) != m_reserved_pages.end())
-            || (!m_free_physical_pages[ppn_to_assign])
-          ) {
-            ppn_to_assign = m_allocator_rng() % m_num_pages;
-          }
-          core_translation[vpn] = ppn_to_assign;
-          m_num_free_physical_pages--;
+          ppn = target->second;
         }
-      } 
+        recent.vpn = vpn;
+        recent.ppn = ppn;
+        recent.valid = true;
+      }
 
-      // We either found an existing translation or have assigned a new page
-      Addr_t p_addr = (core_translation[vpn] << m_offsetbits) | (req.addr & ((1 << m_offsetbits) - 1));
-
-      DEBUG_LOG(DTRANSLATE, m_logger, "Translated Addr {}, VPN {} to Addr {}, PPN {}.", req.addr, vpn, p_addr, core_translation[vpn]);
-
+      const Addr_t p_addr = (ppn << m_offsetbits) | (req.addr & ((1 << m_offsetbits) - 1));
+      DEBUG_LOG(DTRANSLATE, m_logger, "Translated Addr {}, VPN {} to Addr {}, PPN {}.", req.addr, vpn, p_addr, ppn);
       req.addr = p_addr;
       return true;
-    };    
+    };
 
     bool reserve(const std::string& type, Addr_t addr) override {
       Addr_t ppn = addr >> m_offsetbits;

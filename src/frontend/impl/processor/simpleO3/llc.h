@@ -29,7 +29,11 @@ class SimpleO3LLC : public Clocked<SimpleO3LLC> {
 
   private:
     using CacheSet_t = std::list<Line>;   // LRU queue for the set. The head of the list is the least-recently-used way.
-    std::unordered_map<int, CacheSet_t> m_cache_sets;
+    // Cache sets are indexed by fixed hardware bits (0..m_set_size-1).
+    // Direct indexing eliminates hashing and per-set map-node allocation.
+    // The vector is resized once in the constructor, so list iterators
+    // stored in MSHRs remain valid.
+    std::vector<CacheSet_t> m_cache_sets;
     
     using MSHREntry_t = std::pair<Addr_t, CacheSet_t::iterator>;
     using MSHR_t = std::vector<MSHREntry_t>;

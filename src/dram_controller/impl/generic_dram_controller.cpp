@@ -343,7 +343,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       bool request_found = false;
       // 2.1    First, check the act buffer to serve requests that are already activating (avoid useless ACTs)
       if (req_it= m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {
-        if (m_dram->check_ready(req_it->command, req_it->addr_vec)) {
+        if (m_scheduler->selected_request_is_ready() || m_dram->check_ready(req_it->command, req_it->addr_vec)) {
           request_found = true;
           req_buffer = &m_active_buffer;
         }
@@ -369,7 +369,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
           set_write_mode();
           auto& buffer = m_is_write_mode ? m_write_buffer : m_read_buffer;
           if (req_it = m_scheduler->get_best_request(buffer); req_it != buffer.end()) {
-            request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+            request_found = m_scheduler->selected_request_is_ready() || m_dram->check_ready(req_it->command, req_it->addr_vec);
             req_buffer = &buffer;
           }
         }

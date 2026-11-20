@@ -12,6 +12,9 @@ m_latency(latency), m_size_bytes(size_bytes), m_linesize_bytes(linesize_bytes), 
   m_index_offset = calc_log2(m_linesize_bytes);
   m_tag_offset = calc_log2(m_set_size) + m_index_offset;
 
+  // Cache set indices are fixed by the configured LLC geometry.
+  m_cache_sets.resize(m_set_size);
+
   DEBUG_LOG(DSIMPLEO3LLC, m_logger, "Index mask: {0:x}", m_index_mask);
   DEBUG_LOG(DSIMPLEO3LLC, m_logger, "Index offset: {}",  m_index_offset);
   DEBUG_LOG(DSIMPLEO3LLC, m_logger, "Tag offset: {}",    m_tag_offset);
@@ -32,7 +35,9 @@ void SimpleO3LLC::tick() {
         it = m_miss_list.erase(it);
       }
     } else {
-      it++;
+      // All entries are appended with m_clk + fixed m_latency.
+      // Due clocks are nondecreasing; later entries cannot be due.
+      break;
     }
   }
 
@@ -47,7 +52,8 @@ void SimpleO3LLC::tick() {
       it = m_hit_list.erase(it);
     } 
     else {
-      it++;
+      // The hit queue is ordered by completion cycle as well.
+      break;
     }
   }
 };
@@ -68,9 +74,13 @@ bool SimpleO3LLC::send(Request req) {
     m_clk, req.source_id, req.type_id, req.addr, get_index(req.addr), get_tag(req.addr), m_clk, m_clk + m_latency
     );
 
-    // Update the LRU status
-    set.push_back({req.addr, get_tag(req.addr), line_it->dirty || (req.type_id == Request::Type::Write), true});
-    set.erase(line_it);
+    // Update LRU in O(1) without allocating and freeing a list node.
+    // Keep the same updated fields as the previous push_back/erase path.
+    line_it->addr = req.addr;
+    line_it->tag = get_tag(req.addr);
+    line_it->dirty = line_it->dirty || (req.type_id == Request::Type::Write);
+    line_it->ready = true;
+    set.splice(set.end(), set, line_it);
 
     // Add to the hit list to callback when finished
     m_hit_list.push_back(std::make_pair(m_clk + m_latency, req));
@@ -165,11 +175,7 @@ void SimpleO3LLC::receive(Request& req) {
 };
 
 SimpleO3LLC::CacheSet_t& SimpleO3LLC::get_set(Addr_t addr) {
-  int set_index = get_index(addr);
-  if (m_cache_sets.find(set_index) == m_cache_sets.end()) {
-    m_cache_sets.insert(make_pair(set_index, std::list<Line>()));
-  }
-  return m_cache_sets[set_index];
+  return m_cache_sets[get_index(addr)];
 }
 
 SimpleO3LLC::CacheSet_t::iterator SimpleO3LLC::allocate_line(CacheSet_t& set, Addr_t addr) {
@@ -188,8 +194,9 @@ SimpleO3LLC::CacheSet_t::iterator SimpleO3LLC::allocate_line(CacheSet_t& set, Ad
 }
 
 bool SimpleO3LLC::need_eviction(const CacheSet_t& set, Addr_t addr) {
-  if (std::find_if(set.begin(), set.end(), 
-            [addr, this](Line l) { return (get_tag(addr) == l.tag); }) 
+  const Addr_t tag = get_tag(addr);
+  if (std::find_if(set.begin(), set.end(),
+            [tag](const Line& line) { return tag == line.tag; })
       != set.end()) {
     // Due to MSHR, the program can't reach here. Just for checking
     assert(false);
@@ -221,12 +228,12 @@ void SimpleO3LLC::evict_line(CacheSet_t& set, CacheSet_t::iterator victim_it) {
 
 
 SimpleO3LLC::CacheSet_t::iterator SimpleO3LLC::check_set_hit(CacheSet_t& set, Addr_t addr) {
-  auto line_it = std::find_if(set.begin(), set.end(), [addr, this](Line l){return (l.tag == get_tag(addr));});
-  if (!line_it->ready) {
-    return set.end();
-  } else {
-    return line_it;
-  }
+  const Addr_t tag = get_tag(addr);
+  auto line_it = std::find_if(set.begin(), set.end(),
+      [tag](const Line& line) { return line.tag == tag; });
+  // Do not dereference end(): the original code had undefined behavior
+  // on cache misses. A missing or in-flight line is not a cache hit.
+  return line_it != set.end() && line_it->ready ? line_it : set.end();
 }
 
 SimpleO3LLC::MSHR_t::iterator SimpleO3LLC::check_mshr_hit(Addr_t addr) {
@@ -243,9 +250,9 @@ void SimpleO3LLC::serialize(std::string serialization_filename) {
   serialization_file.open(serialization_filename, std::ios::out);
 
   serialization_file << "index,addr,tag,dirty" << std::endl;
-  for (auto it1 = m_cache_sets.begin(); it1 != m_cache_sets.end(); it1++) {
-    for (auto it2 = it1->second.begin(); it2 != it1->second.end(); it2++) {
-      serialization_file << it1->first << "," << it2->addr << "," << it2->tag << "," << it2->dirty << std::endl;
+  for (size_t index = 0; index < m_cache_sets.size(); ++index) {
+    for (const auto& line : m_cache_sets[index]) {
+      serialization_file << index << "," << line.addr << "," << line.tag << "," << line.dirty << std::endl;
     }
   }
   serialization_file.close();
@@ -270,8 +277,8 @@ void SimpleO3LLC::deserialize(std::string serialization_filename) {
     Addr_t addr = std::stoll(addr_str);
     Addr_t tag = std::stoll(tag_str);
     bool dirty = std::stoi(dirty_str);
-    if(m_cache_sets.find(index) == m_cache_sets.end()){
-      m_cache_sets.insert({index, std::list<SimpleO3LLC::Line>()});
+    if (index < 0 || index >= m_set_size) {
+      throw std::runtime_error("Invalid cache set index in LLC serialization");
     }
     m_cache_sets[index].push_back({addr, tag, dirty, 1});
   }
@@ -285,9 +292,9 @@ void SimpleO3LLC::dump_llc() {
    */
   std::cout << "Dumping LLC" << std::endl;
   std::cout << "index,addr,tag,dirty,ready" << std::endl;
-  for (auto it1 = m_cache_sets.begin(); it1 != m_cache_sets.end(); it1++) {
-    for (auto it2 = it1->second.begin(); it2 != it1->second.end(); it2++) {
-      std::cout << it1->first << "," << it2->addr << "," << it2->tag << "," << it2->dirty << "," << it2->ready << std::endl;
+  for (size_t index = 0; index < m_cache_sets.size(); ++index) {
+    for (const auto& line : m_cache_sets[index]) {
+      std::cout << index << "," << line.addr << "," << line.tag << "," << line.dirty << "," << line.ready << std::endl;
     }
   }
 }

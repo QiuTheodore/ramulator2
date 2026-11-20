@@ -16,6 +16,10 @@ class IScheduler {
     virtual ReqBuffer::iterator compare(ReqBuffer::iterator req1, ReqBuffer::iterator req2) = 0;
 
     virtual ReqBuffer::iterator get_best_request(ReqBuffer& buffer) = 0;
+
+    // Optional readiness result for the most recent selection.
+    // Defaults to false so other scheduler implementations retain their checks.
+    virtual bool selected_request_is_ready() const { return false; }
 };
 
 }       // namespace Ramulator

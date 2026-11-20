@@ -1,4 +1,5 @@
 #include <functional>
+#include <utility>
 
 #include "base/utils.h"
 #include "frontend/frontend.h"
@@ -94,13 +95,21 @@ class SimpleO3 final : public IFrontEnd, public Implementation {
     void receive(Request& req) {
       m_llc->receive(req);
 
-      // TODO: LLC latency for the core to receive the request?
-      for (auto r : m_llc->m_receive_requests[req.addr]) {
+      // Each completed address no longer needs to occupy the receive map.
+      // Move the pending callbacks out before erasing their map entry. This
+      // retains the previous callback order and timestamp propagation while
+      // allowing address-distinct streams to release the map's memory.
+      auto pending_it = m_llc->m_receive_requests.find(req.addr);
+      if (pending_it == m_llc->m_receive_requests.end()) {
+        return;  // Previously operator[] inserted and then cleared an empty vector.
+      }
+      std::vector<Request> pending = std::move(pending_it->second);
+      m_llc->m_receive_requests.erase(pending_it);
+      for (auto r : pending) {
         r.arrive = req.arrive;
         r.depart = req.depart;
         m_cores[r.source_id]->receive(r);
       }
-      m_llc->m_receive_requests[req.addr].clear();
     };
 
     bool is_finished() override {

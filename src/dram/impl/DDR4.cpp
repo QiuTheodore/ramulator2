@@ -172,6 +172,9 @@ class DDR4 : public IDRAM, public Implementation {
       Node(DDR4* dram, Node* parent, int level, int id) : DRAMNodeBase<DDR4>(dram, parent, level, id) {};
     };
     std::vector<Node*> m_channels;
+    // V5: skip recursive traversal over non-target bankgroups/banks only
+    // when the DDR4 timing table has no sibling-level rules there.
+    bool m_direct_timing_supported = false;
     
     FuncMatrix<ActionFunc_t<Node>>  m_actions;
     FuncMatrix<PreqFunc_t<Node>>    m_preqs;
@@ -198,6 +201,17 @@ class DDR4 : public IDRAM, public Implementation {
       set_organization();
       set_timing_vals();
 
+      // DDR4's bankgroup/bank levels normally have no sibling timing
+      // constraints. Fall back to the original traversal if that changes.
+      m_direct_timing_supported = true;
+      for (int level : {m_levels["bankgroup"], m_levels["bank"]}) {
+        for (const auto& entries : m_timing_cons[level]) {
+          for (const auto& entry : entries) {
+            if (entry.sibling) m_direct_timing_supported = false;
+          }
+        }
+      }
+
       set_actions();
       set_preqs();
       set_rowhits();
@@ -209,13 +223,67 @@ class DDR4 : public IDRAM, public Implementation {
 
     void issue_command(int command, const AddrVec_t& addr_vec) override {
       int channel_id = addr_vec[m_levels["channel"]];
-      m_channels[channel_id]->update_timing(command, addr_vec, m_clk);
+      if (!update_timing_target_path(command, addr_vec, m_clk)) {
+        // Wildcard commands and unsupported timing models use the exact
+        // original implementation (important for refresh/PREA).
+        m_channels[channel_id]->update_timing(command, addr_vec, m_clk);
+      }
       m_channels[channel_id]->update_powers(command, addr_vec, m_clk);
       m_channels[channel_id]->update_states(command, addr_vec, m_clk);
       
       // Check if the command requires future action
       check_future_action(command, addr_vec);
     };
+
+    // Apply exactly the original DRAMNodeBase target-node timing logic,
+    // without recursing into child/sibling bank nodes.
+    void update_timing_one_target(Node* node, int command, Clk_t clk) {
+      auto& history = node->m_cmd_history[command];
+      if (!history.empty()) {
+        history.pop_back();
+        history.push_front(clk);
+      }
+      for (const auto& entry : m_timing_cons[node->m_level][command]) {
+        if (entry.sibling) continue;
+        const Clk_t past = history[entry.window - 1];
+        if (past < 0) continue;
+        const Clk_t future = past + entry.val;
+        auto& ready = node->m_cmd_ready_clk[entry.cmd];
+        ready = std::max(ready, future);
+      }
+    }
+
+    bool update_timing_target_path(int command, const AddrVec_t& addr_vec, Clk_t clk) {
+      if (!m_direct_timing_supported) return false;
+      const int channel_id = addr_vec[m_levels["channel"]];
+      const int rank_id = addr_vec[m_levels["rank"]];
+      const int group_id = addr_vec[m_levels["bankgroup"]];
+      const int bank_id = addr_vec[m_levels["bank"]];
+      // Preserve wildcard expansion in the generic implementation.
+      if (rank_id < 0 || group_id < 0 || bank_id < 0) return false;
+      Node* channel = m_channels[channel_id];
+      if (rank_id >= static_cast<int>(channel->m_child_nodes.size())) return false;
+      Node* target_rank = channel->m_child_nodes[rank_id];
+      if (group_id >= static_cast<int>(target_rank->m_child_nodes.size())) return false;
+      Node* target_group = target_rank->m_child_nodes[group_id];
+      if (bank_id >= static_cast<int>(target_group->m_child_nodes.size())) return false;
+      Node* target_bank = target_group->m_child_nodes[bank_id];
+
+      update_timing_one_target(channel, command, clk);
+      for (Node* rank : channel->m_child_nodes) {
+        if (rank != target_rank) {
+          // The rank can have rank-to-rank (sibling) constraints, so
+          // retain the original sibling update logic unchanged.
+          rank->update_timing(command, addr_vec, clk);
+        }
+      }
+      update_timing_one_target(target_rank, command, clk);
+      // No sibling timing rules at DDR4 bankgroup/bank levels (checked
+      // in init). Non-target nodes receive no changes in the old code.
+      update_timing_one_target(target_group, command, clk);
+      update_timing_one_target(target_bank, command, clk);
+      return true;
+    }
 
     void check_future_action(int command, const AddrVec_t& addr_vec) {
       switch (command) {
@@ -242,14 +310,74 @@ class DDR4 : public IDRAM, public Implementation {
       }
     };
 
+    // DDR4-specific direct prerequisite dispatch. The generic DRAM tree
+    // traverses channel -> rank -> bankgroup -> bank and invokes several
+    // std::function slots per request. DDR4 registers prerequisites ONLY
+    // for: REFab at rank, and RD/WR/ACT/PRE at bank (see set_preqs()).
+    // Calling the same registered functions directly preserves the exact
+    // row-state and refresh semantics without repeated empty-slot checks.
     int get_preq_command(int command, const AddrVec_t& addr_vec) override {
-      int channel_id = addr_vec[m_levels["channel"]];
-      return m_channels[channel_id]->get_preq_command(command, addr_vec, m_clk);
+      const int channel_id = addr_vec[m_levels["channel"]];
+      auto* channel = m_channels[channel_id];
+      switch (command) {
+        case m_commands["REFab"]: {
+          const int rank_id = addr_vec[m_levels["rank"]];
+          if (rank_id < 0) {
+            return channel->get_preq_command(command, addr_vec, m_clk);
+          }
+          auto* rank = channel->m_child_nodes[rank_id];
+          return Lambdas::Preq::Rank::RequireAllBanksClosed<DDR4>(rank, command, addr_vec, m_clk);
+        }
+        case m_commands["RD"]:
+        case m_commands["WR"]:
+        case m_commands["ACT"]:
+        case m_commands["PRE"]: {
+          const int rank_id = addr_vec[m_levels["rank"]];
+          const int bankgroup_id = addr_vec[m_levels["bankgroup"]];
+          const int bank_id = addr_vec[m_levels["bank"]];
+          if (rank_id < 0 || bankgroup_id < 0 || bank_id < 0) {
+            return channel->get_preq_command(command, addr_vec, m_clk);
+          }
+          auto* bank = channel->m_child_nodes[rank_id]
+                                ->m_child_nodes[bankgroup_id]
+                                ->m_child_nodes[bank_id];
+          if (command == m_commands["PRE"]) {
+            return Lambdas::Preq::Bank::RequireBankClosed<DDR4>(bank, command, addr_vec, m_clk);
+          }
+          return Lambdas::Preq::Bank::RequireRowOpen<DDR4>(bank, command, addr_vec, m_clk);
+        }
+        default:
+          return command;  // No DDR4 prerequisite callback registered.
+      }
     };
 
+    // DDR4-specific direct timing checks. For concrete addresses, only
+    // one path through the node hierarchy is relevant. Wildcard commands
+    // (e.g. all-bank operations) continue using the original generic
+    // traversal, which handles -1 child coordinates.
     bool check_ready(int command, const AddrVec_t& addr_vec) override {
-      int channel_id = addr_vec[m_levels["channel"]];
-      return m_channels[channel_id]->check_ready(command, addr_vec, m_clk);
+      const int channel_id = addr_vec[m_levels["channel"]];
+      auto* channel = m_channels[channel_id];
+      const int rank_id = addr_vec[m_levels["rank"]];
+      const int group_id = addr_vec[m_levels["bankgroup"]];
+      const int bank_id = addr_vec[m_levels["bank"]];
+      if (rank_id < 0 || group_id < 0 || bank_id < 0) {
+        return channel->check_ready(command, addr_vec, m_clk);
+      }
+      if (channel->m_cmd_ready_clk[command] > m_clk) return false;
+      const int scope = m_command_scopes[command];
+      if (scope == m_levels["channel"]) return true;
+
+      auto* rank = channel->m_child_nodes[rank_id];
+      if (rank->m_cmd_ready_clk[command] > m_clk) return false;
+      if (scope == m_levels["rank"]) return true;
+
+      auto* group = rank->m_child_nodes[group_id];
+      if (group->m_cmd_ready_clk[command] > m_clk) return false;
+      if (scope == m_levels["bankgroup"]) return true;
+
+      auto* bank = group->m_child_nodes[bank_id];
+      return bank->m_cmd_ready_clk[command] <= m_clk;
     };
 
     bool check_rowbuffer_hit(int command, const AddrVec_t& addr_vec) override {
