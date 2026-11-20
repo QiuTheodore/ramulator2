@@ -733,6 +733,12 @@ class DDR4 : public IDRAM, public Implementation {
       }
     }
 
+    ~DDR4() override {
+      for (auto* channel : m_channels) {
+        delete channel;
+      }
+    }
+
     void create_nodes() {
       int num_channels = m_organization.count[m_levels["channel"]];
       for (int i = 0; i < num_channels; i++) {

@@ -115,5 +115,8 @@ int main(int argc, char* argv[]) {
   frontend->finalize();
   memory_system->finalize();
 
+  delete frontend;
+  delete memory_system;
+
   return 0;
 }

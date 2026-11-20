@@ -88,6 +88,12 @@ struct DRAMNodeBase {
       }
     };
 
+    ~DRAMNodeBase() {
+      for (auto* child : m_child_nodes) {
+        delete child;
+      }
+    }
+
     void update_states(int command, const AddrVec_t& addr_vec, Clk_t clk) {
       int child_id = addr_vec[m_level+1];
       if (m_spec->m_actions[m_level][command]) {

@@ -17,6 +17,7 @@ namespace Ramulator {
 class Implementation;
 class StatWrapperBase {
   public:
+    virtual ~StatWrapperBase() = default;
     virtual void emit_to(YAML::Emitter& emitter) = 0;
 };
 
@@ -32,6 +33,12 @@ class Stats {
     Registry_t<StatWrapperBase*> _registry;
 
   public:
+    ~Stats() {
+      for (auto& entry : _registry) {
+        delete entry.second;
+      }
+    }
+
     bool is_empty() {
       return _registry.size() == 0;
     }

@@ -26,6 +26,13 @@ class SimpleO3 final : public IFrontEnd, public Implementation {
 
 
   public:
+    ~SimpleO3() override {
+      for (auto* core : m_cores) {
+        delete core;
+      }
+      delete m_llc;
+    }
+
     void init() override {
       m_clock_ratio = param<uint>("clock_ratio").required();
       

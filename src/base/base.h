@@ -78,7 +78,11 @@ class Implementation {
     m_id(id), m_parent(parent) {};
 
 
-    virtual ~Implementation() {};
+    virtual ~Implementation() {
+      for (auto* child : m_children) {
+        delete child;
+      }
+    };
 
     virtual std::string get_name() const = 0;
     virtual std::string get_desc() const = 0;
