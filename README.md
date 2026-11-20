@@ -1,3 +1,71 @@
+# Profiling-Guided Performance Optimization of Ramulator 2.0
+
+**UIUC CS598APE — Performance Engineering, Fall 2026**
+
+**Author:** Xianyang Qiu
+
+**Original Project:** [CMU-SAFARI/Ramulator 2.0](https://github.com/CMU-SAFARI/ramulator2)
+
+**Optimized Branch:** `optimization-v6`
+
+This project optimizes the execution performance of Ramulator 2.0 (v2.0a) while preserving simulation correctness.
+
+## Performance Results
+
+Six alternating runs per implementation and workload; median wall-clock time reported.
+
+| Workload | Original | Optimized | Speedup | Runtime Reduction |
+|---|---:|---:|---:|---:|
+| Unique Memory | 4.985 s | 2.940 s | **1.696x** | 41.0% |
+| Mixed Memory | 0.680 s | 0.435 s | **1.563x** | 36.0% |
+| Write Mix | 1.710 s | 1.055 s | **1.621x** | 38.3% |
+
+All benchmarks use synthetic workloads.
+
+## Optimization Techniques
+
+- DDR4 command and timing evaluation optimization.
+- FRFCFS scheduler traversal and readiness-check optimization.
+- LLC LRU replacement optimization.
+- Last-page address translation caching.
+- Memory request processing optimization.
+- Memory ownership cleanup and resource deallocation.
+
+## Correctness and Memory Safety
+
+Nine configurations were tested: `small`, `unique_smoke`, `write_smoke`, `unique_long`, `mixed_long`, `write_long`, `rank1`, `rank4_fast`, and `two_core`.
+
+- Simulation output comparison: **9/9 PASS**
+- Valgrind memory checking: **9/9 PASS**
+- Release build: **PASS**
+
+Valgrind was run with full leak checking and a nonzero error exit code. Validation applies to the tested configurations.
+
+## Build and Run
+
+Clone the `optimization-v6` branch and build in Release mode:
+
+    git clone --branch optimization-v6 https://github.com/QiuTheodore/ramulator2.git
+    cd ramulator2
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    cmake --build build -j 2
+
+Run with a compatible configuration:
+
+    ./build/ramulator2 -f example_config.yaml
+
+## Additional Documentation
+
+See [OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md) for additional optimization and benchmark details.
+
+## Attribution
+
+This work is based on the original Ramulator 2.0 project by CMU-SAFARI. The original README is preserved below.
+
+---
+
+# Original Ramulator 2.0 Documentation
+
 # Ramulator V2.0a
 ## Ramulator V2.1 Pre-Release Note
 We have pre-released Ramulator 2.1 as a major overhaul to Ramulator 2.0 in the [v2.1 branch](https://github.com/CMU-SAFARI/ramulator2/tree/v2.1)! We recommend you to switch to Ramulator 2.1 and let us know your thoughts (through the Discussions tab on Github) and/or if you find any new bugs (through issues and PRs). We will soon make v2.1 the default on Github and v2.0a will be archived.
