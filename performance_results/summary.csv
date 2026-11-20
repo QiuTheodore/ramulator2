@@ -1,0 +1,10 @@
+workload,version,median_time_seconds,min_seconds,max_seconds,speedup_vs_original,runtime_reduction_pct,median_peak_rss_mb,rss_reduction_pct
+unique_memory_long,ORIGINAL_BASELINE,4.8350,4.740,5.140,1.0000,0.00,131.012,0.00
+unique_memory_long,V5_ALL,3.1450,3.020,3.360,1.5374,34.95,131.176,-0.13
+unique_memory_long,V6_CLEANUP,2.8300,2.710,3.230,1.7085,41.47,35.014,73.27
+mixed_memory_long,ORIGINAL_BASELINE,0.6850,0.640,0.880,1.0000,0.00,34.334,0.00
+mixed_memory_long,V5_ALL,0.4800,0.460,0.560,1.4271,29.93,34.613,-0.81
+mixed_memory_long,V6_CLEANUP,0.4250,0.400,0.490,1.6118,37.96,21.400,37.67
+write_mix_long,ORIGINAL_BASELINE,1.6700,1.620,1.820,1.0000,0.00,48.611,0.00
+write_mix_long,V5_ALL,1.1800,1.150,1.250,1.4153,29.34,48.904,-0.60
+write_mix_long,V6_CLEANUP,1.0300,0.990,1.100,1.6214,38.32,16.699,65.65
